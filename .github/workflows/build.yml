@@ -1,5 +1,20 @@
 name: Build and test
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches:
       - master
@@ -7,82 +22,36 @@ on:
     branches:
       - master
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress:  ${{ github.ref != 'refs/heads/master' }}
+  group: ci-${{ github.ref }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress:  false
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+
+run-name: "Build and test ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
-    env:
-      IOS_SIMULATOR: ${{ matrix.os == 'macos-15' && 'iPhone 16' || 'iPhone 17 Pro' }}
-      IOS_VERSION: ${{ matrix.os == 'macos-15' && '18.5' || 'latest' }}
-    steps:
-    - uses: actions/checkout@v4
-    - name: "xcrun simctl list"
-      run: "xcrun simctl list"
-    - name: Update pod repo
-      run: pod repo update
-    - name: "Lint"
-      run: make lint
-    - name: "Run tests (PACKAGE_MANAGER_COMMAND: test)"
-      env:
-        PACKAGE_MANAGER_COMMAND: test -Xswiftc -warnings-as-errors
-      run: ./run-tests.sh
-    - name: "Run tests (PACKAGE_MANAGER_COMMAND: test --traits SQLiteSwiftCSQLite)"
-      env:
-        PACKAGE_MANAGER_COMMAND: test -Xswiftc -warnings-as-errors --traits SQLiteSwiftCSQLite
-      run: ./run-tests.sh
-    - name: "Run tests (PACKAGE_MANAGER_COMMAND: test --traits SQLiteSwiftCSQLite,FTS5)"
-      env:
-        PACKAGE_MANAGER_COMMAND: test -Xswiftc -warnings-as-errors --traits SQLiteSwiftCSQLite,FTS5
-      run: ./run-tests.sh
-    - name: "Run tests (PACKAGE_MANAGER_COMMAND: test --traits SQLCipher)"
-      env:
-        PACKAGE_MANAGER_COMMAND: test -Xswiftc -warnings-as-errors --traits SQLCipher
-      run: ./run-tests.sh
-    - name: "Run tests (SPM integration test)"
-      env:
-        SPM: run
-      run: ./run-tests.sh
-    - name: "Run tests (BUILD_SCHEME: SQLite iOS)"
-      env:
-        BUILD_SCHEME: SQLite iOS
-      run: ./run-tests.sh
-    - name: "Run tests (BUILD_SCHEME: SQLite Mac)"
-      env:
-        BUILD_SCHEME: SQLite Mac
-      run: ./run-tests.sh
-    - name: "Run tests (VALIDATOR_SUBSPEC: none)"
-      env:
-        VALIDATOR_SUBSPEC: none
-      run: ./run-tests.sh
-    - name: "Run tests (VALIDATOR_SUBSPEC: standard)"
-      env:
-        VALIDATOR_SUBSPEC: standard
-      run: ./run-tests.sh
-    - name: "Run tests (VALIDATOR_SUBSPEC: standalone)"
-      env:
-        VALIDATOR_SUBSPEC: standalone
-      run: ./run-tests.sh
-    - name: "Run tests (VALIDATOR_SUBSPEC: SQLCipher)"
-      env:
-        VALIDATOR_SUBSPEC: SQLCipher
-      run: ./run-tests.sh
-    - name: "Run tests (tuist)"
-      env:
-        TUIST_USE_SWIFTERPM: '0'
-      run: |
-        brew update
-        brew install tuist
-        cd Tests/Tuist/SQLite-Test
-        tuist install
-        # tuist test
   build-linux:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+    - name: Assert instrumentation is live
+      if: env.CHALK_ON == 'true'
+      run: |
+        test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+        test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
     - name: Install
       run: |
         sudo apt-get update -qq
@@ -98,7 +67,19 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+    - name: Assert instrumentation is live
+      if: env.CHALK_ON == 'true'
+      run: |
+        test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+        test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
     - name: Run tests on Android
       uses: skiptools/swift-android-action@v2
       with:
